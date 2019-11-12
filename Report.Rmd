@@ -1,0 +1,1002 @@
+---
+title: "STATS 205 Final"
+author: "Damon Bayer & Corey Katz"
+date: "3/22/2019"
+subparagraph: yes
+output:
+  pdf_document:
+    keep_tex: false
+    df_print: kable
+    extra_dependencies:
+      titlesec: ["tiny"]
+      amsmath: []
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, fig.height = 3)
+library(tidyverse)
+library(here)
+library(bayesplot)
+library(patchwork)
+library(rstan)
+source(here("stats_205_final_functions.R"))
+
+theme_set(theme_bw())
+options(digits = 4)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+dat_day1 <- read.table("IrishElectricity.txt", as.is = T, header = T) %>%
+  `[`( , 1:7) %>%
+  as_tibble() %>% 
+  rename(y = V1)
+
+full_dat <- read.table("IrishElectricity.txt", as.is = T, header = T) %>% 
+  as_tibble()
+full_dat_x <- as.matrix(cbind(1, full_dat[,1:6]))
+full_dat_y <- as.matrix(full_dat[,-(1:6)])
+```
+
+
+# 1. For simplicity, we will first focus on the first day of the four months period (November 15, 2009).
+
+## (a) In a few short sentences, propose a modeling approach to describe the daily total electricity consumption as a function of a (subset) of the covariates.
+
+In order to describe the daily total electricity consumption as a function of the covariates, we propose a Bayesian linear regression model using column 7 (daily total electricity consumption on November 15, 2009) as the response variable and the first 6 columns (Age, Attitude-Reduce Bill, Attitude-Environment, Education, Resident, and Room) as predictors. Because Age, Attitude-Reduce Bill, Attitude-Environment, and Education take only 5 discrete values, we may consider treating them as categorical (factor) variables. However, because they are each ordinal values, we choose to treat them as continuous.
+
+## (b) Conduct an exploratory data analysis and discuss possible predictors you may consider in the model.
+
+We begin our exploratory data analysis by looking at bi-variate plots of our possible predictors and our response:
+
+```{r EDA 1, warning=FALSE}
+# dat_day1 %>%
+#   select(-y) %>% 
+#   mutate_if(is.integer, as.factor) %>%
+#   gather(key = "variable", "value") %>% 
+#   ggplot(aes(x = value, group = value)) +
+#   facet_wrap( ~ variable, scales = "free") +
+#   geom_bar()
+# 
+# ggplot(dat_day1, aes(x = y)) +
+#   geom_histogram(bins = 30) +
+#   xlab("Electricity Consumption (kWh)")
+```
+
+
+```{r EDA 2}
+dat_day1 %>% 
+  gather(key = "variable", "value", -y) %>% 
+  ggplot(aes(value, y, group = value)) +
+  facet_wrap( ~ variable, scales = "free") +
+  geom_boxplot()
+```
+
+Based on this plot, there is some evidence for including `Bedroom` and `Resident` in our model. We now consider some possible interactions. We hypothesize that households with more education are more likely to take action based on their beliefs, thus we look at possible interactions between `Education` and the two `Attitude` variables.
+
+```{r EDA Interaction}
+dat_day1 %>% 
+  select(Education, starts_with("Attitude"), y) %>%
+  as_tibble() %>% 
+  mutate(Education = as.factor(Education)) %>% 
+  gather("Variable", "Value", -y, -Education) %>%
+  ggplot(aes(x = Value, y = y,
+             group = Education,
+             # linetype = Education,
+             color = Education,
+             shape = Education)) +
+  facet_wrap(~ Variable, scales = "free_x", strip.position = "bottom") +
+  geom_point(alpha = 0.25) +
+  geom_smooth(method = "lm", formula = y ~ x, se = F) +
+  theme(strip.background = element_blank(),
+        strip.placement = "outside",
+        legend.position = "bottom") +
+  xlab(NULL) +
+  ylab("Electricity Consumption (kWh)")
+```
+
+Based on these plots, there is some evidence for interaction between `Attitude.Reduce.Bill` and `Education`.
+
+## (c) This is a methodological question, no data analysis required: Consider a standard improper prior (SIR) and a prior which assumes $B_j \sim N(0, 10^6)$, $j = 1, \ldots p$, and $\tau \sim \text{Gamma}(0.001, 0.001)$ for inference on $p$ regression coefficients and the precision in a regression model, respectively. What are the pros and cons of each choice? How do they differ?
+
+The standard improper reference prior and vague priors are used when we have very little information regarding our parameters of interest. Using them when information of our prior is available, would be considered a disadvantage because we lose information that could have been incorporated into the model. Both priors share the same kernels, and the posterior means of the parameters will be very similar. 
+
+The standard improper reference prior is a flat prior distribution on $\beta$'s and on $\log(\tau)$. The use of the SIR prior results in frequentist-like inference on the beta's and tau. This can be considered both a pro and con by different statisticians. Unlike frequentist's, the inference using the SIR prior does not rely on large sample theory. Some programming languages, such as JAGS, cannot handle improper priors, which is a clear disadvantage to using the SIR.  
+
+The biggest difference between the SIR prior and the vague reference priors is that the vague priors are proper. Thus, they can also be used in JAGS, which makes them preferable to SIR. Vague priors are also useful for preliminary data analysis and sensitivity analysis. Overall, if we do not have any prior information vague priors are preferred.
+
+## (d) This is a methodological question, no data analysis required: Define the so- called g-prior for inference on $p$ regression coefficients in a regression model. What are the pros and cons of the g-prior?
+
+Zellner's G-priors, one of the most common prior choices, are of the following form:
+$$\beta|\tau \sim N_r(\beta_0,\frac{g}{\tau}(X^TX)^{-1}) \ \ \ \ \ \tau \sim Gamma(a,b)$$ where $\beta_0 = (X^TX)^{-1}X^TY \ \ \text{or} \ \ 0$. If $\beta_0$ is chosen to be $(X^TX)^{-1}X^TY$, then the prior seems to be data dependent. For this reason, $\beta_0=0$ is the better choice.
+
+Two benefits of using g-priors are that they are invariate and conjugate priors. This allows for easier calculations and more information to be provided to the prior based on how the choice of $g$. Different choices of  $g$ that determine how much weight is put on the prior information.
+
+## (e) This is a methodological question, no data analysis required: Consider a g-prior with 3 values of g: a value that puts equal weight to prior and likelihood, a value that has the equivalent weight of one observation, and the value suggested by Fernandez et al (2001), i.e. g = max(n, r2). Based on your knowledge of the scientific problem considered here, which of the choices would you suggest?
+
+In this problem, $n=151$ and $r=6$, which means that considering a $g$ where the prior would have the equivalent to one observation ($g=n$) is the same as the $g$  suggested by Fernandez. This limits our decision to choosing between $g=n$ and $g=1$ (the $g$ that gives equal weight to both the prior and the data). As discussed in part d) we want to use a $g$-prior that is centered at $\beta_0=0$, and therefore, do not want to put too much much weight on the prior distribution. By setting $g=n$, we allow the prior distribution to have higher variance, which reflects our lack of prior knowledge. Giving too much weight to a prior centered at zero  pulls our estimates toward zero. The covariance of the prior is also influenced by the covariance of our predictors. This could cause issues if the elements of the predictor covariance matrix are very small. Using $g = 1$, can result in a prior with a small variance and too much influence over the posterior. Overall, we want put more weight on the our data, so we set $g = n$. 
+
+## (f) Discuss possible models for the Irish Electricity data, including different sets of predictors, and prior construction. Please, focus on main effects (i.e., no interactions) for now. Which variables would you surely want to include in the model? Which ones would you decide to exclude? You should try deleting terms and use model selection criteria for deciding which variables to keep and which to remove. Please, provide a motivated summary of your exploration. Be sure to explain and motivate all your steps.
+
+Based on our answer in part E, we choose to proceed using the Zellner g-prior with $g = n$. From our exploratory data analysis, we see no reason to exclude any of our possible predictors. We would like to include interaction between `Education` and `Attitude.Reduce.Bill`, but will omit them for now.
+
+Our Stan model is presented below.
+
+```{stan output.var = 'model1', eval = F, echo = T}
+data {
+  int<lower=0> N;   // number of data items
+  int<lower=0> K;   // number of predictors
+  matrix[N, K] x;   // predictor matrix
+  vector[N] y;      // outcome vector
+  
+  vector[K] mu_beta; // beta prior mean
+  matrix[K, K] Sigma_beta;// beta prior covariance
+  real<lower=0> a;
+  real<lower=0> b;
+  
+  int<lower=0> M;   // number of new data items
+  matrix[M, K] xnew;
+}
+parameters {
+  vector[K] beta;       // coefficients for intercept & predictors
+  real<lower=0> tau;  // error scale
+}
+transformed parameters{
+  vector[N] CPOinv;
+  vector[K] BetaMoreThan0;
+  
+  for (k in 1:K){
+    BetaMoreThan0[k] = step(beta[k]);
+  }
+  
+  for (n in 1:N){
+    CPOinv[n] = sqrt(2*3.14159 / tau) * exp(0.5 * tau * pow(y[n] - x[n,] * beta, 2));
+  }
+}
+model {
+  tau ~ gamma(a, b);
+  beta ~ multi_normal(mu_beta, Sigma_beta / tau);
+  
+  y ~ normal(x * beta, 1 / sqrt(tau));  // likelihood
+}
+generated quantities {
+  vector[M] ynew;
+  vector[N] log_lik;
+  
+  for(i in 1:M) {
+    ynew[i] = normal_rng(xnew[i,] * beta, 1 / sqrt(tau));
+  }
+  for (n in 1:N){
+    log_lik[n] = normal_lpdf(y[n] | x[n] * beta, 1 / sqrt(tau));
+  }
+}
+```
+
+
+```{r echo = F,eval = F}
+write_rds(model1, here("model1.rds"))
+```
+
+```{r echo=FALSE}
+model1 <- read_rds(here("model1.rds"))
+r_all <- read_rds(here("r_all.rds"))
+r_noed <- read_rds(here("r_noed.rds"))
+r_noage <- read_rds(here("r_noage.rds"))
+r_sub <- read_rds(here("r_sub.rds"))
+```
+
+
+### All Variables Model
+
+Posterior inference for the All variables model are presented below. Note the betas correspond to `Intercept`, `Age`, `Resident`, `Attitude.Reduce.Bill`, `Attitude.Environment`, `Bedroom`, and `Education`, respectively.
+
+```{r all summary}
+summary_coef(r_all)
+summary_coef_0(r_all)
+mcmc_areas_coef(r_all)
+```
+
+From the plots and tables, we note that there is a high probability of beta 2 and beta 7 being near 0. We now consider removing the corresponding variables (`Age` and `Education`) from our model. We proceed by fitting a model without `Age`, a model without `Education` and a model with neither. Posterior inference tables for each are presented below. In the future models, we consider a coefficient to have "a high probability of being near 0" if mean `BetaMoreThan0` $\in (0.25, 0.75).$
+
+### No Age Model
+
+Note that betas correspond to `Intercept`, `Resident`, `Attitude.Reduce.Bill`, `Attitude.Environment`, `Bedroom`, and `Education`, respectively.
+
+```{r noage summary}
+summary_coef(r_noage)
+summary_coef_0(r_noage)
+# mcmc_areas_coef(r_noage)
+```
+
+We may consider `Attitude.Reduce.Bill` for removal if we were to continue with a step-wise selection process.
+
+### No Education Model
+
+Note that betas correspond to `Intercept`, `Age`, `Resident`, `Attitude.Reduce.Bill`, `Attitude.Environment`, and `Bedroom`, respectively.
+
+```{r noed summary}
+summary_coef(r_noed)
+summary_coef_0(r_noed)
+# mcmc_areas_coef(r_noed)
+```
+
+We may consider `Attitude.Reduce.Bill` for removal if we were to continue with a step-wise selection process.
+
+### No Age or Education Model
+
+Note that betas correspond to `Intercept`, `Resident`, `Attitude.Reduce.Bill`, `Attitude.Environment`, and `Bedroom`, respectively.
+
+
+```{r neither summary}
+summary_coef(r_noage)
+summary_coef_0(r_noage)
+# mcmc_areas_coef(r_noage)
+```
+
+We may consider `Attitude.Reduce.Bill` for removal if we were to continue with a step-wise selection process.
+
+\pagebreak
+
+## (g) Justify your final choice of model. For example, you can present posterior inference for regression parameters and for sub-population means in appropriately designed tables or figures.
+
+```{r model comparison, message=FALSE, warning=FALSE}
+model_list <- list(r_all, r_noage, r_noed, r_sub)
+names(model_list) <- c("All", "No Age", "No Edu", "Neither")
+
+sapply(model_list, final_stats) %>%
+  as.data.frame() %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Model")
+```
+
+While all models achieve roughly equivalent LPML and WAIC values, we choose the neither model as our preferred model because it is the simplest and achieves the highest LPML and lowest WAIC. Posterior inference for betas is available above.
+
+Posterior inference for the predicted values of 5 randomly selected points are presented below, along with the actual observed `y` value. In 4 of the 5 samples, the actual `y` is captured in the 50% credible interval.
+
+```{r subpopulation means}
+xnew_sub <- read_rds(here("xnew_sub.rds"))
+set.seed(205)
+my_sample <- sample(151, 5, FALSE)
+colnames(full_dat_x)<- c("1", "Age", "Res", "Bill", "Env.", "Bed", "Ed")
+
+cbind(full_dat_x[my_sample,], y = full_dat_y[my_sample,1], summary(r_sub, pars = str_c("ynew[", 6:10, "]"))$summary) %>% as_tibble() %>% select(-`1`, -n_eff, -Rhat)
+```
+
+Residual plot for the posterior means are is presented below:
+
+```{r diagnostics neither}
+x_all <- cbind(1, as.matrix(dat_day1[,1:6]))
+x_sub <- x_all[,-c(2,7)]
+y <- dat_day1$y
+model_neither_resid <- tibble(fitted = as.vector(x_sub %*% summary(r_sub)$summary[1:ncol(x_sub),1]),y,
+       residual = y - fitted)
+
+ggplot(model_neither_resid, aes(fitted, residual)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = F) +
+ggplot(model_neither_resid, aes(sample = residual)) +
+  geom_qq() +
+  geom_qq_line()
+```
+
+The upper right of the qq plot may be cause concern, but, overall, we are satisfied with our residual plot.
+
+## (h) Based on your analysis, is the level of education associated with energy consumption? Motivate your answer, using Bayesian hypothesis testing.
+
+We conduct a Bayesian hypothesis test using the pseudo Bayes Factor to compare the full model to the model without education.
+
+The calculated 2LBF is `r unname(2 * (final_stats(r_noed)[1] - final_stats(r_all)[1]))`. Because this value is near 2, the data weakly supports the hypothesis that education is associated with energy consumption.
+
+# 2. Now consider a model that contains the following predictors: Age, number of residents, level of education and the interaction between level of education and number of residents.
+
+```{r}
+r_noint <- read_rds(here("r_noint.rds"))
+r_int <- read_rds(here("r_int.rds"))
+```
+
+## (a) This is a methodological question, with a data analysis question: Discuss the log marginal pseudo likelihood (LPML) as a criterion for model selection. What are the main features, advantages and possible disadvantages of this model selection criterion? Run a regression model with the interaction variable versus a model without. Compare the two models using the LPML criterion.
+
+The log pseudo-marginal  likelihood criteria uses pseudo-marginal likelihoods, instead of marginal likelihoods, which may be impossible or impractical to compute. This criterion allows for evaluation of a model through the model's predictive accuracy. Calculating the components of the LMPL are much easier with MCMC sampling, one of the biggest advantages of this criteria. This criterion is very easily implemented in model, but may still be computationally expensive. Models with the higher LPML are preferred. This method only allows for comparison between nested models, which is a disadvantage.
+
+### No Interaction Model
+
+```{r noint summary}
+summary_coef(r_noint)
+# summary_coef_0(r_noint)
+# mcmc_areas_coef(r_noint)
+```
+
+### Interaction Model
+
+```{r int summary}
+summary_coef(r_int)
+# summary_coef_0(r_int)
+# mcmc_areas_coef(r_int)
+```
+
+
+```{r model comparison 2, message=FALSE, warning=FALSE}
+model_list2 <- list(r_int, r_noint)
+names(model_list2) <- c("Interaction", "No Interaction")
+
+sapply(model_list2, final_stats) %>%
+  as.data.frame() %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Model")
+```
+
+Based on the LMPL, the No Interaction model is preferred.
+
+## (b) This is a methodological question, with a data analysis question: Discuss the Bayes Factor as a criterion for model selection. What are the main features, advantages and possible disadvantages of this model selection criterion? What rule of thumb has been suggested to determine strength of evidence in favor of one model by using the Bayes Factor? Run a regression model with the interaction variable versus a model without. Compare the two models using the Bayes Factor.
+
+Bayes Factors allow for comparisons of models that may not share the same parameters. This is a distinct advantage over the LPML criterion, which only allowed for the comparison of nested models. The Bayes factor between 2 models is derived from the posterior odds. After the application of Bayes' Theorem, Bayes Factor takes the form, $\frac{p(y|M_0)}{p(y|M1)}$. Multiplying the Bayes Factor by the prior odds, yields the posterior odds. More commonly, 2 times the log of the Bayes Factor is used to compare two models. Using 2LBF, the strength of evidence towards one model/hypothesis can be determined. The LBF is also more stable and interpretable when the BF is very large or very small. 
+
+In many cases it is easy to calculate the regular Bayes Factor from posterior samples, but we can also use LPML of two models to calculate a pseudo Bayes Factor. One advantage of Bayes Factors is its transitivity. Knowing how Model A compares to Model B and how Model B compares to Model C allows us to determine how Model A compares to Model C. Bayes Factors also have some disadvantages. They cannot be used with improper priors. Additionally, use of the Bayes Factor implicitly assumes that one of the two models is correct. Bayes Factors can also be computationally expensive.
+
+Based on our calculated 2LBF of `r unname(2 * (final_stats(r_noint)[1] - final_stats(r_int)[1]))`, we conclude that the interaction model is not worth considering. Thus, we prefer the no interaction model.
+
+## (c) Discuss a sensitivity analysis on the best model you have selected from the previous two points (with or without interaction). Comment on the results from the sensitivity analysis.
+
+In this section, we compare different priors: \(\tau \sim \Gamma(0.01, 0.01)\), \(\tau \sim \Gamma(0.001, 0.001)\) and \(\tau \sim \Gamma(0.0001, 0.0001)\).
+
+```{r}
+r_noint01 <- read_rds(here("r_noint01.rds"))
+r_noint0001 <- read_rds(here("r_noint0001.rds"))
+```
+
+# \(\tau \sim \Gamma(0.01, 0.01)\)
+```{r}
+summary_coef(r_noint01)
+```
+
+# \(\tau \sim \Gamma(0.001, 0.001)\)
+```{r}
+summary_coef(r_noint)
+```
+
+# \(\tau \sim \Gamma(0.0001, 0.0001)\)
+```{r}
+summary_coef(r_noint)
+```
+
+Posterior estimates for each beta are approximately equal in all cases. In some cases, the posterior mean for Beta 2 is positive, while in others, it is negative. This is not concerning, as the 95% credible intervals are approximately equal.
+
+## (d) Now consider a household with median age, number of residents, and level of education. What is the median level of energy consumption and a range of values that you can predict for this household based on that information? How would you change your answer if the household had four residents instead?
+
+```{r}
+xnew_noint <- dat_day1 %>%
+  select(Age, Resident, Education) %>%
+  summarise_all(list(median)) %>%
+  as.matrix() %>% 
+  cbind("1" = 1, .) %>% 
+  rbind(., .)
+xnew_noint[2, 3] <- 4
+
+cbind(Data = c("Median","Modified"), xnew_noint[,-1], select(summary_ynew(r_noint), `2.5%`, `50%`, `97.5%`))
+```
+
+The estimated median is given by the `50%` column. A reasonable range of values is given by the `2.5%` and `97.5%` columns. We note that the estimated consumption for the median house is about 6 units less than the estimated consumption for the house with 4 residents.
+
+# 3. Now we want to describe the patterns of household electricity consumption over time, that is considering all the daily consumption data. In this regard, we want to propose a hierarchical model that is able to conduct inference about both population level usage as well as the household level usage.
+
+## (a) Propose (and motivate) a model (in formulas!) to describe the daily consumption pattern as a function of the predictors.
+
+We will use a hierarchical linear regression model to describe daily consumption methods. 
+
+
+$$Y_i^j | \underline{\beta}^j, \tau^j \sim N(X_i\underline\beta^j, \tau^j)$$
+where i= 1:151, j=1:121, $X_i$ is the row of the predictor matrix corresponding to the $i^{th}$ house, $\underline{\beta}^j$ is the vector of coeffeicents for the $j^{th}$ day, and $\tau^j$ is the precision for the $j^{th}$ day.
+
+We choose to use $g$-priors, with $g=n$, on $\underline{\beta}^j$ and vague gamma priors on $\tau^j$. This allows us to obtain a perpetrate regression line for each day, with its own precision. The following are the distributions:
+
+$$\underline{\beta}^j|\tau^j \sim N\left(\underline{\beta}_p,\frac{n}{\tau^j}CO^{-1}\right) \ \ \ \ \ and  \ \ \ \ \tau^j \sim Gamma(0.001,0.001)$$
+where $\underline{\beta}_p$ is a population level regression line and $CO^{-1}$ is the covariance matrix for the predictors.
+
+The model contains a separate regression line for each day and a regression line for the population. The last step is to put priors on the population level regression line. We again use $g$-priors for the population level regression coeffeicents and a vague prior on the precision at the population level. 
+
+$$\underline{\beta}_p|\tau_p \sim N\left(\underline{0},\frac{n}{\tau_p}CO^{-1}\right) \ \ \ \ \ and  \ \ \ \ \tau_p \sim Gamma(0.001,0.001)$$
+
+This allows for population level inference as well as daily inference. We will be able to obtain predictive posterior distributions for each household at both the daily level and the population level (overall).
+
+## (b) Run the previous model in Jags and provide a plot to describe the time-varying effect of the number of residents on the daily consumption both at the population level and also for households # 30, # 83 and # 91, and comment on their time patterns. Motivate and comment on your inference. (I believe you should be able to propose a model to conduct at least population level inference. I would recognize partial credit so solutions that allow only population level inference. In any event, credit will be recognized only if you appropriately justify your modeling choices)
+
+Our stan model is presented below:
+
+```{stan output.var = 'model2a', eval = F, echo = T}
+data {
+  int<lower=0> N;   // number of data items
+  int<lower=0> K;   // number of predictors
+  int<lower=0> D;   // number of days
+  matrix[N, K] x;   // predictor matrix
+  matrix[N,D] y;    // outcome vector
+  
+  int<lower=0> M;  // number of new households
+  matrix[M,K] x_new; // predictor matrix
+  
+  vector[K] beta_0_pop; // beta prior mean for population
+  matrix[K, K] inv_covariance; // covariance matrix
+  real<lower=0> a;
+  real<lower=0> b;
+}
+
+parameters {
+  vector[K] beta_pop;// coefficients for intercept & predictors at population level
+  matrix[K,D] beta_day; //coefficients for intercept & predictors at day level
+  real<lower=0> tau_pop;  // error scale
+  real<lower=0> tau_day[D];
+}
+
+model {
+  tau_pop ~ gamma(a, b);
+  tau_day ~gamma(a,b);
+  
+  beta_pop ~ multi_normal(beta_0_pop, (N*inv_covariance)/tau_pop);
+  
+  for (d in 1:D){
+    beta_day[,d] ~ multi_normal(beta_pop, (N*inv_covariance)/tau_day[d]);
+    y[,d] ~ normal(x * beta_day[,d], 1 / sqrt(tau_day[d]));  // likelihood
+  }
+}
+
+generated quantities{
+  matrix[M,D] ynew;
+  vector[M] ynew_p;
+  
+  for(d in 1:D){
+    for(i in 1:M) {
+      ynew[i,d] = normal_rng(x_new[i,] * beta_day[,d], 1 / sqrt(tau_day[d]));
+    }
+  }
+  for(i in 1:M) {
+   ynew_p[i] = normal_rng(x_new[i,] * beta_pop, 1 / sqrt(tau_pop));
+  }
+}
+```
+
+```{r, eval=F}
+write_rds(model2a, here("model_part3.rds"))
+```
+
+
+```{r}
+r_part3 <- read_rds(here("r_part3.rds"))
+```
+
+```{r}
+# beta 3's are resident
+summary(r_part3, pars = names(r_part3)[startsWith(names(r_part3), "beta_day[3")])$summary %>%
+  as_tibble() %>%
+  mutate(t = row_number()) %>% 
+ggplot(aes(x = t, y = mean, ymin = `2.5%`, ymax = `97.5%`)) +
+  geom_ribbon(alpha = 0.3) +
+  geom_line() +
+  xlab("Day") +
+  ylab("Resident Coefficient") +
+  ggtitle("Population Level Posterior Mean and 95% Cred. Int.")
+```
+
+```{r}
+house30sum <- summary(r_part3, names(r_part3)[startsWith(names(r_part3), "ynew[1")])$summary %>% 
+  as_tibble() %>% 
+  mutate(day = row_number(),
+         house = 30)
+house83sum <- summary(r_part3, names(r_part3)[startsWith(names(r_part3), "ynew[2")])$summary %>% 
+  as_tibble() %>% 
+  mutate(day = row_number(),
+         house = 83)
+house91sum <- summary(r_part3, names(r_part3)[startsWith(names(r_part3), "ynew[3")])$summary %>% 
+  as_tibble() %>% 
+  mutate(day = row_number(),
+         house = 91)
+
+housesum <- bind_rows(house30sum, house83sum, house91sum) %>% 
+  mutate(house = str_c("House ", house))
+
+ggplot(housesum, aes(x = day, y = mean, ymin = `2.5%`, ymax = `97.5%`, group = house)) +
+  facet_wrap(. ~ house) +
+    geom_ribbon(alpha = 0.3) +
+  geom_vline(xintercept = 41, color = "red") +
+  geom_line() +
+  ylab("Consumption Posterior Mean and 95% Cred. Int.")
+```
+
+Aside from a peak at day 41 (Christmas - indicated by a red vertical line), the estimate of the Resident coefficient appears relatively stable, and oscillates around 2.
+
+For each house, there is a clear peak Consumption on Christmas. Aside from this, the consumption levels appear to be relatively stable, with a possible decrease after the new year. We note that some of our 95% credible intervals fall below 0 consumption  in House 30 and House 91.
+
+\pagebreak
+
+# 4. On January 1, 2010, there was a major change in the tariff structure on electricity consumption. Is there a difference in energy consumption pattern before versus after the policy change? During the 2.5 months after the change does the pattern of energy consumption at the population level tend to return to the pattern before the policy change? Hint: there are many ways to answer this question. Some are OK, some are not. Please, a) justify your modeling choices b) Bayesian hypothesis testing is always rooted on probabilistic statements c) be brief, to the point but also make sure I can follow what you are doing. As always, credit will be recognized only if you appropriately justify your choices.
+
+We will use a hierarchical linear regression model to describe daily consumption methods before and after January 1 when the new tariffs were implemented. 
+
+The $Y$'s (consumption) follow the distribution:
+$$Y_i^j | \underline{\beta}^j, \tau^j \sim N(X_i\underline\beta^j, \tau^j)$$
+where i= 1:151, j=1:121, $X_i$ is the row of the predictor matrix corresponding to the $i^{th}$ house, $\underline{\beta}^j$ is the vector of coeffeicents for the $j^{th}$ day, and $\tau^j$ is the precision for the $j^{th}$ day.
+
+Now we need prior distributions on $\underline{\beta}^j$ and $\tau^j$. We choose to use $g$-priors, with $g=n$, on the $\underline{\beta}^j$ and vague gamma priors on $\tau^j$. This allows us to obtain a separate regression line for each day, with its own precision. This time we break up the days into two time intervals; before and after January 1st. The following are the distributions for the day level $\beta$'s and the day level $\tau$'s:
+
+For j=1:47:
+$$\underline{\beta}^j|\tau^j \sim N(\underline{\beta}_{BJ1},\frac{n}{\tau^{j}}CO^{-1}) \ \ \ \ \ and  \ \ \ \ \tau^j \sim Gamma(0.001,0.001)$$
+where $\underline{\beta}_{BJ1}$ is a  regression line for days before January 1st and $CO^{-1}$ is the covariance matrix for the predictors.
+
+For j=48:121:
+$$\underline{\beta}^j|\tau^j \sim N(\underline{\beta}_{AJ1},\frac{n}{\tau^{j}}CO^{-1}) \ \ \ \ \ and  \ \ \ \ \tau^j \sim Gamma(0.001,0.001)$$
+where $\underline{\beta}_{AJ1}$ is a  regression line for days after January 1st and $CO^{-1}$ is the covariance matrix for the predictors.
+
+Now we have a model with a separate regression line for each day, and a regression line for each time period. Now each time period should come from an overall population level $\beta$. This allows us to connect the two time periods together. We also consider different precisions for each time period. The following are the distributions on the two sets of parameters for before and after January 1st:
+
+$$\underline{\beta}_{BJ1}|\tau_{BJ1} \sim N\left(\underline{\beta}_{p},\frac{n}{\tau^{BJ1}}CO^{-1}\right) \ \ \ \ \ and  \ \ \ \ \tau_{BJ1} \sim Gamma(0.001,0.001)$$
+where $\underline{\beta}_{p}$ is a regression line for all days and $CO^{-1}$ is the covariance matrix for the predictors.
+
+and
+
+$$\underline{\beta}_{AJ1}|\tau_{AJ1} \sim N\left(\underline{\beta}_{p},\frac{n}{\tau_{AJ1}}CO^{-1}\right) \ \ \ \ \ and  \ \ \ \ \tau_{AJ1} \sim Gamma(0.001,0.001)$$
+where $\underline{\beta}_{p}$ is a regression line for all days and $CO^{-1}$ is the covariance matrix for the predictors.
+
+Finally, we put priors on the population level regression line. We again use $g$-priors for the population level regression coeffeicents and a vague prior on the precision at the population level. 
+
+$$\underline{\beta}_p|\tau_p \sim N\left(\underline{0},\frac{n}{\tau_p}CO^{-1}\right) \ \ \ \ \ and  \ \ \ \ \tau_p \sim Gamma(0.001,0.001)$$
+
+This allows for population level inference as well as daily inference. We now can investigate differences in regression lines for the two time periods. We are able to obtain predictive posterior distributions for each household as well at the daily level, time period level, and the population level (overall).
+
+Our stan model is presented below
+
+```{stan output.var = 'model3', eval = F, echo = T}
+data {
+  int<lower=0> N;   // number of data items
+  int<lower=0> K;   // number of predictors
+  int<lower=0> D;   // number of days
+  int<lower=0> T_n;   // number of time intervals
+  matrix[N, K] x;   // predictor matrix
+  matrix[N,D] y;      // outcome vector
+  int<lower=0> D_before;
+  
+  
+  vector[K] beta_0_pop; // beta prior mean for population
+  matrix[K, K] inv_covariance; // covariance matrix
+  real<lower=0> a;
+  real<lower=0> b;
+}
+
+parameters {
+  vector[K] beta_pop; // coefficients for intercept & predictors at population level
+  matrix[K,T_n] beta_ba; // coefficicents for the two time intervals
+  matrix[K,D] beta_day; //coefficients for intercept & predictors at day level
+  // variance parameters
+  real<lower=0> tau_pop; 
+  real<lower=0> tau_ba[T_n];
+  real<lower=0> tau_day[D];
+}
+
+model {
+  tau_pop ~ gamma(a, b); //prior distribution on population level variance
+  tau_day ~gamma(a,b);//prior distribution on day level variance
+  tau_ba ~ gamma(a,b);//prior distribution on before/after date variance
+  
+  beta_pop ~ multi_normal(beta_0_pop, (N*inv_covariance)/tau_pop);//popualtion level prior on coef.
+  
+  for (t in 1:T_n){
+    beta_ba[,t] ~ multi_normal(beta_pop, (N*inv_covariance)/tau_ba[t]);
+  }
+  
+  for (d in 1:D_before){
+    beta_day[,d] ~ multi_normal(beta_ba[,1], (N*inv_covariance)/tau_day[d]); //day level coef. prior before certain date
+    y[,d] ~ normal(x * beta_day[,d], 1 / sqrt(tau_day[d]));  // likelihood
+  }
+  
+  for (j in (D_before+1):D){
+    beta_day[,j] ~ multi_normal(beta_ba[,2], (N*inv_covariance)/tau_day[j]);//day level coef. prior after certain date
+    y[,j] ~ normal(x * beta_day[,j], 1 / sqrt(tau_day[j]));  // likelihood
+  }
+  
+}
+```
+
+
+```{r, eval=F}
+write_rds(model3, here("model3.rds"))
+```
+
+
+```{r}
+r_part4 <- read_rds("r_part4.rds")
+```
+
+
+```{r eval=FALSE}
+part4samples <- as.data.frame(r_part4)
+
+before <- part4samples %>%
+  select(starts_with("ynew_b")) %>% 
+  as.matrix()
+
+before_all <- as.vector(t(apply(before, 1, function(x) tapply(x, ceiling(seq_along(x) / 151), sum))))
+
+after <- part4samples %>%
+  select(starts_with("ynew_a")) %>%
+  as.matrix()
+
+after_all <- as.vector(t(apply(after, 1, function(x) tapply(x, ceiling(seq_along(x) / 151), sum))))
+
+write_rds(before_all, here("before_all.rds"))
+write_rds(after_all, here("after_all.rds"))
+
+population_level <- part4samples %>% select(starts_with("ynew["))
+
+population_level_all <- t(apply(population_level, 1, function(x) tapply(x, ceiling(seq_along(x)/151), sum)))
+
+write_rds(population_level_all, here("population_level_all.rds"))
+```
+
+
+```{r}
+before_all <- read_rds(here("before_all.rds"))
+after_all <- read_rds(here("after_all.rds"))
+
+bind_rows(tibble(x = after_all, group = "After Jan. 1"),
+  tibble(x = before_all, group = "Before Jan. 1")) %>% 
+  ggplot(aes(x = x, group = group, fill = group)) +
+  geom_density(alpha = 0.5) +
+  xlab("Total Daily Consumption")
+```
+
+
+```{r}
+n_samp <- min(length(after_all), length(before_all))
+set.seed(205)
+```
+
+```{r}
+sapply(list(Before = before_all, After = after_all), function(x){c(mean = mean(x), sd = sd(x), quantile(x,c(0.025, 0.5, 0.975)))}) %>%
+  t() %>%
+  as.data.frame() %>% 
+  rownames_to_column("Group") %>%
+  as_tibble()
+```
+
+To evaluate whether or not there was a change in daily consumption after the tariff change, we examined the predictive posterior distributions on total daily consumption. To calculate the estimated total daily consumption, before and after the tariff, we used the before and after regression lines to estimate the daily consumption for each house. We then summed over all houses for each day in both groups to obtain a sample of total daily consumption. The distributions are compared in the plot and table above. Based on these, we can see that consumption is typically higher for the days before Jan 1. We also conducted a test to find the probability that the posterior mean before Jan 1 is higher than the posterior mean after Jan 1:
+
+$$H_0: \mu_{before}=\mu_{after} \ \ \ \ H_a: \mu_{before}>\mu_{after}$$
+
+We found the probability ($P(\mu_{before}>\mu_{after}|data)$) to be `r mean(sample(before_all, n_samp) > sample(after_all, n_samp))`. This is high enough to conclude that the total daily consumption of all houses was higher before the tariff than after.
+
+
+We can also see a difference in the pattern of energy usage before and after the change. The total daily consumption varies day by day prior to January 1st (sd = 272), while the day-to-day levels are more consistent after January 1st (sd = 150). This is also visible in the plots above and below.
+
+Thus, there is clearly a change in daily consumption following the tariff change. Now, we aim to evaluate whether or not energy consumption eventually returned to its original level. The following plot shows the total daily consumption for all houses with the red line indicating January 1st.
+
+
+```{r}
+population_level_all <- read_rds(here("population_level_all.rds"))
+
+apply(population_level_all, 2, function(x){c(mean = mean(x), quantile(x,c(0.025, 0.5, 0.975)))}) %>%
+  t() %>%
+  as_tibble() %>%
+  rownames_to_column("Day") %>% 
+  mutate(Day = as.integer(Day)) %>% 
+  ggplot(aes(x = Day, y = mean, ymin = `2.5%`, ymax = `97.5%`)) +
+  geom_ribbon(alpha = 0.3) +
+  geom_line() +
+  geom_vline(xintercept = 48, color = "red") +
+  annotate("text", x = 60, y = 6000, label = "January 1", color = "red") +
+  ylab("Total Consumption")
+```
+
+We note that after January 1st the total daily consumption across all houses clearly drops and does not return to its previous level. This change may be due to the end of the holiday season. The spike in consumption on Christmas day is evidence that the holidays may be related to energy consumption. The warming weather may also account for the difference in energy consumption. Because of these possible confounding factors, this data may not be suitable for investigating the affect of the tariff. The question would be better answered by historical data from prior years, so we could evaluate whether or not the change is due to the tariff or one of the possible confounding variables.
+
+```{r stats_205_final_function, eval=F}
+final_stats <- function(r) {
+  CPO <- summary(r, pars = c("CPOinv"))$summary[,1]
+  LPML <- sum(log(1 / CPO))
+  log_lik <- loo::extract_log_lik(r)
+  WAIC <- loo::waic(log_lik)[[5]]
+  
+  return(c(LPML = LPML,
+              WAIC = WAIC))
+}
+
+summary_coef <- function(r) {
+  summary(r, pars = c(names(r)[startsWith(names(r), "beta")], "tau"))$summary %>%
+    as.data.frame() %>% 
+    rownames_to_column("Variable") %>%
+    as_tibble()
+}
+
+summary_coef_0 <- function(r) {
+  summary(r, pars = c(names(r)[startsWith(names(r), "Beta")]))$summary %>% 
+    as.data.frame() %>% 
+    rownames_to_column("Variable") %>%
+    as_tibble()
+}
+
+summary_ynew <- function(r) {
+  summary(r, pars = c(names(r)[startsWith(names(r), "ynew")]))$summary %>% 
+    as.data.frame() %>% 
+    rownames_to_column("y") %>%
+    as_tibble()
+}
+
+mcmc_areas_coef <- function(r) {
+  bayesplot::mcmc_areas(as.matrix(r), pars = names(r)[startsWith(names(r), "beta")])
+}
+```
+
+```{r modelingQ1, eval = F}
+library(tidyverse)
+library(here)
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+dat_day1 <- read.table("IrishElectricity.txt", as.is = T, header = T) %>%
+  `[`( , 1:7) %>%
+  as_tibble() %>% 
+  rename(y = V1)
+
+model1 <- read_rds(here("model1.rds"))
+
+# Modeling All -----------------------------------------------------------------
+x_all <- cbind(1, as.matrix(dat_day1[,1:6]))
+
+y <- dat_day1$y
+
+N <- nrow(x_all)
+K_all <- ncol(x_all)
+
+mu_beta_all <- rep(0, K_all)
+Sigma_beta_all <- solve(t(x_all) %*% x_all)
+a <- b <- 0.001
+
+set.seed(205)
+my_sample <- sample(nrow(x_all), size = 5, replace = FALSE)
+xnew_all <- cbind(1,
+                  dat_day1 %>%
+                    select(-Education, -y) %>% 
+                    summarise_all(list(mean)),
+                  Education = 1:5) %>%
+  as.matrix() %>% 
+  rbind(x_all[my_sample,])
+
+M <- nrow(xnew_all)
+
+data_model_all <- list(N = N, K = K_all, x = x_all, y = y,
+                       a = a, b = b,
+                       mu_beta = mu_beta_all,
+                       Sigma_beta = N * Sigma_beta_all,
+                       M = M, xnew = xnew_all)
+
+r_all <- sampling(object = model1, data = data_model_all)
+
+write_rds(r_all, here("r_all.rds"))
+
+# Modeling No Age --------------------------------------------------------------
+x_noage <- x_all[,-2]
+
+K_noage <- ncol(x_noage)
+
+mu_beta_noage <- rep(0, K_noage)
+Sigma_beta_noage <- solve(t(x_noage) %*% x_noage)
+
+xnew_noage <- xnew_all[,-7]
+
+set.seed(205)
+
+data_model_noage <- list(N = N, K = K_noage, x = x_noage, y = y,
+                         a = a, b = b,
+                         mu_beta = mu_beta_noage,
+                         Sigma_beta = N * Sigma_beta_noage,
+                         M = M, xnew = xnew_noage)
+
+r_noage <- sampling(object = model1, data = data_model_noage)
+
+write_rds(r_noage, here("r_noage.rds"))
+
+
+# Modeling No Ed ---------------------------------------------------------------
+x_noed <- x_all[,-7]
+
+K_noed <- ncol(x_noed)
+
+mu_beta_noed <- rep(0, K_noed)
+Sigma_beta_noed <- solve(t(x_noed) %*% x_noed)
+
+xnew_noed <- xnew_all[,-7]
+
+set.seed(205)
+
+data_model_noed <- list(N = N, K = K_noed, x = x_noed, y = y,
+                        a = a, b = b,
+                        mu_beta = mu_beta_noed,
+                        Sigma_beta = N * Sigma_beta_noed,
+                        M = M, xnew = xnew_noed)
+
+r_noed <- sampling(object = model1, data = data_model_noed)
+
+write_rds(r_noed, here("r_noed.rds"))
+
+# Modeling Sub -----------------------------------------------------------------
+x_sub <- x_all[,-c(2,7)]
+
+K_sub <- ncol(x_sub)
+
+mu_beta_sub <- rep(0, K_sub)
+Sigma_beta_sub <- solve(t(x_sub) %*% x_sub)
+
+xnew_sub <- xnew_all[,-c(2,7)]
+write_rds(xnew_sub, here("xnew_sub.rds"))
+
+set.seed(205)
+
+data_model_sub <- list(N = N, K = K_sub, x = x_sub, y = y,
+                       a = a, b = b,
+                       mu_beta = mu_beta_sub,
+                       Sigma_beta = N * Sigma_beta_sub,
+                       M = M, xnew = xnew_sub)
+
+r_sub <- sampling(object = model1, data = data_model_sub)
+
+write_rds(r_sub, here("r_sub.rds"))
+
+# Modeling No Int --------------------------------------------------------------
+x_noint <- as.matrix(cbind(1, select(dat_day1, Age, Resident, Education)))
+
+K_noint <- ncol(x_noint)
+
+mu_beta_noint <- rep(0, K_noint)
+
+Sigma_beta_noint <- solve(t(x_noint) %*% x_noint)
+
+xnew_noint <- dat_day1 %>%
+  select(Age, Resident, Education) %>%
+  summarise_all(list(median)) %>%
+  as.matrix() %>% 
+  cbind("1" = 1, .) %>% 
+  rbind(., .)
+xnew_noint[2, 3] <- 4
+
+M_noint <- nrow(xnew_noint)
+
+set.seed(205)
+
+data_model_noint <- list(N = N, K = K_noint, x = x_noint, y = y,
+                         a = a, b = b,
+                         mu_beta = mu_beta_noint,
+                         Sigma_beta = N * Sigma_beta_noint,
+                         M = M_noint, xnew = xnew_noint)
+
+r_noint <- sampling(object = model1, data = data_model_noint)
+
+write_rds(r_noint, here("r_noint.rds"))
+
+# Modeling Int -----------------------------------------------------------------
+x_int <- cbind(x_noint, Interaction = x_noint[,3] * x_noint[,4])
+
+K_int <- ncol(x_int)
+
+mu_beta_int <- rep(0, K_int)
+Sigma_beta_int <- solve(t(x_int) %*% x_int)
+
+xnew_int <- cbind(xnew_noint, Interaction = xnew_noint[,3] * xnew_noint[,4])
+
+M_int <- nrow(xnew_int)
+
+set.seed(205)
+
+data_model_int <- list(N = N, K = K_int, x = x_int, y = y,
+                       a = a, b = b,
+                       mu_beta = mu_beta_int,
+                       Sigma_beta = N * Sigma_beta_int,
+                       M = M_int, xnew = xnew_int)
+
+r_int <- sampling(object = model1, data = data_model_int)
+
+write_rds(r_int, here("r_int.rds"))
+
+# Modeling No Int 0.01  --------------------------------------------------------
+data_model_noint01 <- list(N = N, K = K_noint, x = x_noint, y = y,
+                         a = 0.01, b = 0.01,
+                         mu_beta = mu_beta_noint,
+                         Sigma_beta = N * Sigma_beta_noint,
+                         M = M_noint, xnew = xnew_noint)
+
+r_noint01 <- sampling(object = model1, data = data_model_noint01)
+
+write_rds(r_noint01, here("r_noint01.rds"))
+
+# Modeling No Int 0.0001  --------------------------------------------------------
+data_model_noint0001 <- list(N = N, K = K_noint, x = x_noint, y = y,
+                             a = 0.0001, b = 0.0001,
+                             mu_beta = mu_beta_noint,
+                             Sigma_beta = N * Sigma_beta_noint,
+                             M = M_noint, xnew = xnew_noint)
+
+r_noint0001 <- sampling(object = model1, data = data_model_noint0001)
+
+write_rds(r_noint0001, here("r_noint0001.rds"))
+
+```
+
+```{r Model2, eval = F}
+library(rstan)
+library(readr)
+library(tidyverse)
+library(here)
+source(here("summary_functions_205.R"))
+options(digits = 4)
+model_part3 <- read_rds(here("model_part3.rds"))
+
+full_dat <- read.table("IrishElectricity.txt", as.is = T, header = T) %>% 
+  as_tibble()
+full_dat_x <- as.matrix(cbind(1, full_dat[,1:6]))
+full_dat_y <- as.matrix(full_dat[,-(1:6)])
+
+partial_y <- full_dat_y[,c(1,2,3)]
+# Modeling All -----------------------------------------------------------------
+X <- full_dat_x
+
+y <- full_dat_y
+
+N <- nrow(X)
+K <- ncol(X)
+D <- ncol(y)
+
+beta_0_pop <- rep(0, K)
+inv_covariance <- solve(t(X) %*% X)
+a <- b <- 0.001
+
+
+set.seed(205)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+
+
+data_part3 <- list(N = N, K = K, D=D, x = X, y = y,
+                       a = a, b = b,
+                       beta_0_pop = beta_0_pop,
+                       inv_covariance=inv_covariance,
+                   x_new = full_dat_x[c(30, 83, 91),], M = 3)
+
+r_part3 <- sampling(object = model_part3, data = data_part3)
+
+Beta_post <- as.vector(summary(r)$summary[c(1,2,3,4,5,6,7)])
+fitted.y <- X %*% Beta_post
+residuals <- y[,1]- fitted.y
+
+plot(residuals~fitted.y)
+write_rds(r_part3, here("r_part3.rds"))
+
+write_rds(r, here("r_hierarchical_part3.rds"))
+
+r_p3 <- read_rds(here("r_hierarchical_part3.rds"))
+Beta_post_p3 <- as.vector(summary(r_p3)$summary[c(1,2,3,4,5,6,7)])
+fitted.y_p3 <- X %*% Beta_post_p3
+residuals_p3 <- y[,1]- fitted.y_p3
+
+plot(residuals_p3~fitted.y_p3)
+
+# Model 3 ------------------------------------------
+# Question 4
+
+model_part4 <- read_rds(here("model_part4.rds"))
+
+T_n <- 2
+D_before <- 47
+
+set.seed(205)
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+data_part4 <- list(N = N, K = K, D=D, x = X, y = y,
+                     T_n = T_n, D_before = D_before,
+                     a = a, b = b,
+                     beta_0_pop = beta_0_pop,
+                     inv_covariance = inv_covariance,
+                     M = nrow(full_dat_x), x_new = full_dat_x)
+
+r_part4 <- sampling(object = model_part4, data = data_part4)
+write_rds(r_part4, here("r_part4.rds"))
+```
+
