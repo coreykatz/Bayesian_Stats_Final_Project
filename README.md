@@ -33,5 +33,8 @@ The data includes information from 151 households from Nov 2009 - Mar 2010. Info
 
 The report includes all the code for this project. Any code I wrote is in a the other files. Full samples for the models are not included in this repo. 
 
+Files starting with `model` are the Stan models written in rstan.
+Files starting with `results` are the code for running the models and getting samples from the posterior distributions. 
+
 
 
